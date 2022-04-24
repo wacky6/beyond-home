@@ -1,0 +1,158 @@
+<html>
+<head>
+  <title>Beyond Home SSO</title>
+</head>
+
+<body>
+  <h1>Beyond Home SSO</h1>
+  <pre>
+TODO:
+ * Web build pipeline
+ * Web UI
+   * key enroll
+   * view public key
+   * password input
+   * log out
+  </pre>
+</body>
+
+
+
+<!-- TODO: Figure out Web resource build pipeline -->
+<script src="./noble-ed25519.js"></script>
+
+<script>
+function u8ToBase64(u8Arr) {
+  return btoa(String.fromCharCode(...u8Arr))
+}
+
+function base64ToU8(s) {
+  return strToU8(atob(s))
+}
+
+function strToU8(s) {
+  return new Uint8Array([...s].map(c => c.charCodeAt(0)))
+}
+
+const storagePrefix = 'beyond'
+const deviceIdentity = 'test-dev'
+
+// privk: Uint8Array of unencrypted key
+// password: String used to derive key encryption key
+async function storeKey(id, privk, password) {
+  const iv = crypto.getRandomValues(new Uint8Array(16))
+  const encryptedKey = new Uint8Array(await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      additionalData: strToU8('ed25519')
+    },
+    await deriveKeyEncryptionKey(password), 
+    privk,
+  ))
+
+  localStorage.setItem(`${storagePrefix}key_${id}`, u8ToBase64(encryptedKey))
+  localStorage.setItem(`${storagePrefix}keyiv_${id}`, u8ToBase64(iv))
+}
+
+// password: String used to derive key encryption key
+async function readKey(id="0", password="test") {
+  const base64EncryptedKey = localStorage.getItem(`${storagePrefix}key_${id}`)
+  const base64Iv = localStorage.getItem(`${storagePrefix}keyiv_${id}`)
+  
+  if (!base64EncryptedKey || !base64Iv)
+    return null
+
+  return crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: base64ToU8(base64Iv),
+      additionalData: strToU8('ed25519')
+    },
+    await deriveKeyEncryptionKey(password),
+    base64ToU8(base64EncryptedKey),
+  ).then(
+    key => new Uint8Array(key),
+    err => Promise.reject(new Error("Failed to validate key, wrong password?"))
+  )
+}
+
+// Return a AES-GCM CryptoKey for encrypt and decrypt stored private keys.
+async function deriveKeyEncryptionKey(password) {
+  const iterations = 1e6
+  const salt = strToU8("beyond-home")
+  const derivedKey = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+    await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(password),
+      { name: "PBKDF2" },
+      false,
+      [ "deriveKey" ]
+    ),
+    { name: "AES-GCM", length: 256 },
+    false,
+    [ "encrypt", "decrypt" ]
+  )
+  return derivedKey
+}
+
+async function enrollNewKey(id="0", password="test") {
+  const privateKey = await ed25519.utils.randomPrivateKey()
+  await storeKey(id, privateKey, password)
+
+  const publicKey = await ed25519.getPublicKey(privateKey)
+  privateKey.fill(0)
+
+  // TODO: turn this into a UI
+  console.log('beyond-keys:')
+  console.log(`ed25519 ${u8ToBase64(publicKey)} ${deviceIdentity}`)
+}
+
+;(async function (){
+  ed25519 = nobleEd25519
+
+  // TODO: update this into UI
+  const privateKey = await readKey()
+
+  let challengeCookie = document.cookie.split(';')
+      .map($ => $.trim().split('='))
+      .find($ => $[0].startsWith('beSsoCh_'))
+
+  if (challengeCookie) {
+    let challenge = JSON.parse(atob(challengeCookie[1].split('.')[1]))
+    console.log(challenge.c)
+    const challengeResp = await ed25519.sign(
+      new TextEncoder().encode(challenge.c),
+      privateKey
+    )
+    const signature = u8ToBase64(challengeResp)
+    console.log(signature)
+
+    const resp = await fetch('/r', {
+      method: 'post',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        s: signature
+      })
+    }).then(r => r.json())
+    if (resp.ok) {
+      // TODO: parse query and location.replace(redirect_url)
+      const qs = location.search.substring(1)
+      for (const q of qs.split('&')) {
+        const qv = q.split('=')
+        const opt = decodeURIComponent(qv[0] || "")
+        const val = decodeURIComponent(qv[1] || "")
+
+        if (opt === 'r') {
+          console.log(val)
+          window.location.replace(decodeURIComponent(val))
+          return
+        }
+      }
+    }
+  }
+})()
+</script>
