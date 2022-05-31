@@ -38,6 +38,7 @@ const HEADER_CONTENT_TYPE = "content-type"
 const HEADER_X_FORWARDED_FOR = "x-forwarded-for"
 const HEADER_X_FORWARDED_HOST = "x-forwarded-host"
 const HEADER_X_FORWARDED_PROTO = "x-forwarded-proto"
+const HEADER_ACCEPT_CH = "Accept-CH"
 
 const jwtSecretLength = 32 // Per-runtime jwt secret
 const jwtNonceLength = 32  // Per-authuentication nonce length
@@ -81,7 +82,8 @@ func handleAuthReq(w http.ResponseWriter, req *http.Request) {
 
 	// Check signature.
 	curSig := session.GenerateSignature(req)
-	if ssoSession.ClientSignatures.CalculateSimilarity(curSig) < session.CLIENT_SIGNATURE_VERIFICATION_THRESHOLD {
+	curSigSimiliarity := ssoSession.ClientSignatures.CalculateSimilarity(curSig)
+	if curSigSimiliarity < session.CLIENT_SIGNATURE_VERIFICATION_THRESHOLD {
 		// Need to re-authenticate because the client signature isn't similar.
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -184,6 +186,7 @@ func handleChallengeResponse(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var sessionId string
+	var ssoSession *session.SsoSession
 
 	if ssoCookie, _ := req.Cookie(ssoCookieName); ssoCookie != nil {
 		// Try to find an existing SsoSession.
@@ -193,7 +196,7 @@ func handleChallengeResponse(w http.ResponseWriter, req *http.Request) {
 			ReplyCh:   replyCh,
 		}
 
-		ssoSession := <-replyCh
+		ssoSession = <-replyCh
 		if ssoSession != nil {
 			sessionId = ssoCookie.Value
 		}
@@ -216,15 +219,21 @@ func handleChallengeResponse(w http.ResponseWriter, req *http.Request) {
 		log.Printf("TODO: Trigger login audit")
 	}
 
-	ssoSession := session.SsoSession{
-		IssuedAt:    time.Now(),
-		ReauthAfter: time.Now().Add(opts.AuthExpiry),
+	var clientSignatures session.ClientSignatureList
+	if ssoSession == nil {
+		clientSignatures = []session.ClientSignature{}
+	}
+
+	newSsoSession := session.SsoSession{
+		IssuedAt:         time.Now(),
+		ReauthAfter:      time.Now().Add(opts.AuthExpiry),
+		ClientSignatures: append(clientSignatures, session.GenerateSignature(req)),
 	}
 
 	replyCh := make(chan interface{})
 	ssoManagerCh <- session.SsoSet{
 		SessionId: sessionId,
-		Session:   ssoSession,
+		Session:   newSsoSession,
 		ExpireAt:  time.Now().Add(opts.SsoExpiry),
 		ReplyCh:   replyCh,
 	}
@@ -266,20 +275,6 @@ func handleIndex(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if req.URL.Query().Has(QUERY_REDIRECT) {
-		if cookie, err := req.Cookie(ssoCookieName); err == nil {
-			// Found SSO cookie.
-			replyCh := make(chan *session.SsoSession)
-			ssoManagerCh <- session.SsoGet{
-				SessionId: cookie.Value,
-				ReplyCh:   replyCh,
-			}
-			ssoSession := <-replyCh
-			if ssoSession != nil && time.Now().Before(ssoSession.ReauthAfter) {
-				w.Header().Set("Location", req.URL.Query().Get(QUERY_REDIRECT))
-				w.WriteHeader(http.StatusFound)
-				return
-			}
-		}
 		if err := generateAndSetChallengeCookie(w, req); err != nil {
 			// Failed to generate challenge.
 			w.Header().Set(HEADER_CONTENT_TYPE, MIME_HTML)
@@ -293,6 +288,7 @@ func handleIndex(w http.ResponseWriter, req *http.Request) {
 	// Send index page.
 	index_html, _ := web.WebFs.ReadFile("index.html")
 	w.Header().Set(HEADER_CONTENT_TYPE, MIME_HTML)
+	w.Header().Set(HEADER_ACCEPT_CH, session.ACCEPTED_CLIENT_HINTS)
 	w.WriteHeader(http.StatusOK)
 	w.Write(index_html)
 }

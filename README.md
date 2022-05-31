@@ -4,7 +4,7 @@ beyond-home
 
 # Assumptions
 
-* Connection to application server and authentication server is already secured(via TLS + Certificate Transparency +  DNSSEC). In other words, malicious party can't pretend to be the server we are connecting to.
+* Connection to application server and authentication server is already secured(via TLS + Certificate Transparency +  DNSSEC). Malicious party can't pretend to be the server we are connecting to.
 
 
 # Install
