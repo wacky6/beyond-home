@@ -51,7 +51,7 @@ var jwtSecret []byte
 var ssoCookieName string
 var ssoChallengeCookieName string
 
-var ssoManagerCh session.SsoManagerChannel
+var sm session.SessionMap = session.CreateSessionMap()
 
 func handleAuthReq(w http.ResponseWriter, req *http.Request) {
 	ssoCookie, err := req.Cookie(ssoCookieName)
@@ -61,14 +61,8 @@ func handleAuthReq(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	replyCh := make(chan (*session.SsoSession))
-	ssoManagerCh <- session.SsoGet{
-		SessionId: ssoCookie.Value,
-		ReplyCh:   replyCh,
-	}
-
-	ssoSession := <-replyCh
-	if err != nil || ssoSession == nil {
+	ssoSession := sm.Get(ssoCookie.Value)
+	if ssoSession == nil {
 		// Cookie is not associated with a session.
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -89,16 +83,11 @@ func handleAuthReq(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Refresh session expiry.
-	replyCh2 := make(chan interface{})
-	ssoManagerCh <- session.SsoSet{
-		SessionId: ssoCookie.Value,
-		Session:   *ssoSession,
-		ExpireAt:  time.Now().Add(opts.SsoExpiry),
-		ReplyCh:   replyCh2,
-	}
+	// TODO: Update client signature to take into account of permanent / semi-permanent relocating
+	// NOTE: SignatureLastActiveTime ?
 
-	<-replyCh2
+	// Refresh session expiry.
+	sm.Set(ssoCookie.Value, time.Now().Add(opts.SsoExpiry), *ssoSession)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -189,20 +178,10 @@ func handleChallengeResponse(w http.ResponseWriter, req *http.Request) {
 	var ssoSession *session.SsoSession
 
 	if ssoCookie, _ := req.Cookie(ssoCookieName); ssoCookie != nil {
-		// Try to find an existing SsoSession.
-		replyCh := make(chan (*session.SsoSession))
-		ssoManagerCh <- session.SsoGet{
-			SessionId: ssoCookie.Value,
-			ReplyCh:   replyCh,
-		}
-
-		ssoSession = <-replyCh
-		if ssoSession != nil {
-			sessionId = ssoCookie.Value
-		}
+		ssoSession = sm.Get(ssoCookie.Value)
 	}
 
-	if sessionId == "" {
+	if ssoSession == nil {
 		// Client is starting a new session.
 		sessionIdBytes := make([]byte, sessionIdBytes)
 		if _, err := io.ReadFull(rand.Reader, sessionIdBytes); err != nil {
@@ -230,14 +209,7 @@ func handleChallengeResponse(w http.ResponseWriter, req *http.Request) {
 		ClientSignatures: append(clientSignatures, session.GenerateSignature(req)),
 	}
 
-	replyCh := make(chan interface{})
-	ssoManagerCh <- session.SsoSet{
-		SessionId: sessionId,
-		Session:   newSsoSession,
-		ExpireAt:  time.Now().Add(opts.SsoExpiry),
-		ReplyCh:   replyCh,
-	}
-	<-replyCh
+	sm.Set(sessionId, time.Now().Add(opts.SsoExpiry), newSsoSession)
 
 	// Clear challenge cookie.
 	http.SetCookie(w, &http.Cookie{
@@ -348,9 +320,6 @@ func main() {
 			httpFileServer.ServeHTTP(w, req)
 		}
 	})
-
-	ssoManagerCh = make(session.SsoManagerChannel)
-	go session.SessionManager(ssoManagerCh)
 
 	listenAddr := fmt.Sprintf(":%d", opts.Port)
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {

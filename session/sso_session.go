@@ -1,8 +1,13 @@
 package session
 
 import (
+	"sync"
 	"time"
 )
+
+// The number of time before a SsoSessionInternal object is removed from the storage map.
+// Should allow enough time for concurrent calls manipulating on the ssoSession to complete.
+const itemExpiryDelay = time.Second * 60
 
 // SsoSession stores information about an active SSO session.
 type SsoSession struct {
@@ -12,63 +17,63 @@ type SsoSession struct {
 }
 
 type SsoSessionInternal struct {
-	Session     SsoSession
+	Session  SsoSession
+	ExpireAt time.Time
+	// Timer to remove `this` from the map, triggered after `itemExpiryDelay` when `this` expires.
 	ExpiryTimer *time.Timer
 }
 
-type SsoAction = int
-
-type SsoManagerChannel = chan interface{}
-
-type SsoSet struct {
-	SessionId string
-	Session   SsoSession
-	ExpireAt  time.Time
-	ReplyCh   chan interface{}
-}
-type SsoGet struct {
-	SessionId string
-	ReplyCh   chan (*SsoSession)
+// sync.Map from SessionId to SsoSessionInternal
+type SessionMap struct {
+	m    map[string]SsoSessionInternal
+	lock sync.RWMutex
 }
 
-type SessionMap = map[string]SsoSessionInternal
+func (sm *SessionMap) Get(sessionId string) *SsoSession {
+	sm.lock.RLock()
+	defer sm.lock.RUnlock()
+	ssi, ok := sm.m[sessionId]
+	if !ok {
+		return nil
+	}
 
-func SessionManager(ch SsoManagerChannel) {
-	ssoSessions := SessionMap{}
+	if ssi.ExpireAt.Before(time.Now()) {
+		return nil
+	}
 
-	for {
-		op := <-ch
-		switch v := op.(type) {
-		case SsoSet:
-			internalSession, found := ssoSessions[v.SessionId]
-			if found && internalSession.ExpiryTimer != nil {
-				internalSession.ExpiryTimer.Stop()
-			}
+	return &ssi.Session
+}
 
-			internalSession = SsoSessionInternal{
-				Session:     v.Session,
-				ExpiryTimer: time.NewTimer(time.Until(v.ExpireAt)),
-			}
+func (sm *SessionMap) Set(sessionId string, expireAt time.Time, ssoSession SsoSession) {
+	sm.lock.Lock()
+	defer sm.lock.Unlock()
 
-			ssoSessions[v.SessionId] = internalSession
+	ssi, ok := sm.m[sessionId]
+	if ok {
+		// Cancel timer.
+		ssi.ExpiryTimer.Stop()
+	}
 
-			// Setup timeout
-			go func(ssoSessions SessionMap, timer <-chan time.Time, sessionId string) {
-				_, ok := <-timer
-				if ok {
-					delete(ssoSessions, v.SessionId)
-				}
-			}(ssoSessions, internalSession.ExpiryTimer.C, v.SessionId)
-			v.ReplyCh <- true
-		case SsoGet:
-			internalSession, found := ssoSessions[v.SessionId]
-			if !found {
-				v.ReplyCh <- nil
-			} else {
-				v.ReplyCh <- &internalSession.Session
-			}
-		default:
-			// No-op.
+	ssi = SsoSessionInternal{
+		Session:     ssoSession,
+		ExpireAt:    expireAt,
+		ExpiryTimer: time.NewTimer(time.Until(expireAt.Add(itemExpiryDelay))),
+	}
+	go func(timer <-chan time.Time, sessionId string) {
+		_, ok := <-timer
+		if ok {
+			sm.lock.Lock()
+			defer sm.lock.Unlock()
+			delete(sm.m, sessionId)
 		}
+	}(ssi.ExpiryTimer.C, sessionId)
+
+	sm.m[sessionId] = ssi
+}
+
+func CreateSessionMap() SessionMap {
+	return SessionMap{
+		m:    make(map[string]SsoSessionInternal),
+		lock: sync.RWMutex{},
 	}
 }
