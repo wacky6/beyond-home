@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// The number of time before a SsoSessionInternal object is removed from the storage map.
+// The number of time before a internalSsoSession object is removed from the storage map.
 // Should allow enough time for concurrent calls manipulating on the ssoSession to complete.
 const itemExpiryDelay = time.Second * 60
 
@@ -16,16 +16,16 @@ type SsoSession struct {
 	ClientSignatures ClientSignatureList
 }
 
-type SsoSessionInternal struct {
+type internalSsoSession struct {
 	Session  SsoSession
 	ExpireAt time.Time
 	// Timer to remove `this` from the map, triggered after `itemExpiryDelay` when `this` expires.
 	ExpiryTimer *time.Timer
 }
 
-// sync.Map from SessionId to SsoSessionInternal
+// sync.Map from SessionId to internalSsoSession
 type SessionMap struct {
-	m    map[string]SsoSessionInternal
+	m    map[string]internalSsoSession
 	lock sync.RWMutex
 }
 
@@ -54,7 +54,7 @@ func (sm *SessionMap) Set(sessionId string, expireAt time.Time, ssoSession SsoSe
 		ssi.ExpiryTimer.Stop()
 	}
 
-	ssi = SsoSessionInternal{
+	ssi = internalSsoSession{
 		Session:     ssoSession,
 		ExpireAt:    expireAt,
 		ExpiryTimer: time.NewTimer(time.Until(expireAt.Add(itemExpiryDelay))),
@@ -73,7 +73,7 @@ func (sm *SessionMap) Set(sessionId string, expireAt time.Time, ssoSession SsoSe
 
 func CreateSessionMap() SessionMap {
 	return SessionMap{
-		m:    make(map[string]SsoSessionInternal),
+		m:    make(map[string]internalSsoSession),
 		lock: sync.RWMutex{},
 	}
 }
