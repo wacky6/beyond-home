@@ -2,3 +2,5 @@ bin
 *.log
 *.key
 go.work
+web/build/*
+!web/build/webfs.go

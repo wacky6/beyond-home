@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"time"
@@ -13,7 +14,7 @@ import (
 	"github.com/jessevdk/go-flags"
 	"github.com/wacky6/beyond-home/auth"
 	"github.com/wacky6/beyond-home/session"
-	"github.com/wacky6/beyond-home/web"
+	frontend "github.com/wacky6/beyond-home/web"
 )
 
 type AuthKey = auth.AuthKey
@@ -30,8 +31,8 @@ var opts struct {
 	Telegram        string        `short:"t" long:"telegram" default:"" description:"Telegram <token>:<chat_id> to send audit notifications."`
 }
 
-const MIME_JSON = "application/json"
-const MIME_HTML = "text/html"
+var MIME_JSON = mime.TypeByExtension(".json")
+
 const QUERY_REDIRECT = "r"
 
 const HEADER_CONTENT_TYPE = "content-type"
@@ -246,23 +247,19 @@ func handleIndex(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	log.Println("handleIndex") // DO NOT SUBMIT: DEBUG
+
 	if req.URL.Query().Has(QUERY_REDIRECT) {
 		if err := generateAndSetChallengeCookie(w, req); err != nil {
 			// Failed to generate challenge.
-			w.Header().Set(HEADER_CONTENT_TYPE, MIME_HTML)
-			error_html, _ := web.WebFs.ReadFile("index_503.html")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write(error_html)
+			frontend.ServeError(frontend.ErrorServiceUnavailable, w)
 			return
 		}
 	}
 
 	// Send index page.
-	index_html, _ := web.WebFs.ReadFile("index.html")
-	w.Header().Set(HEADER_CONTENT_TYPE, MIME_HTML)
 	w.Header().Set(HEADER_ACCEPT_CH, session.ACCEPTED_CLIENT_HINTS)
-	w.WriteHeader(http.StatusOK)
-	w.Write(index_html)
+	frontend.Serve(w, req)
 }
 
 func handleLogOut(w http.ResponseWriter, req *http.Request) {
@@ -312,12 +309,11 @@ func main() {
 	http.HandleFunc("/r", handleChallengeResponse)
 	http.HandleFunc("/logout", handleLogOut)
 
-	httpFileServer := http.FileServer(http.FS(web.WebFs))
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/" {
 			handleIndex(w, req)
 		} else {
-			httpFileServer.ServeHTTP(w, req)
+			frontend.Serve(w, req)
 		}
 	})
 
